@@ -1,5 +1,5 @@
-Rodando servidor:
+Rodando frontend:
 * npm run dev
 
-Rodando frontend:
+Rodando backend:
 * uvicorn main:app --reload

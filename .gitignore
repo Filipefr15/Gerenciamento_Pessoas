@@ -1,0 +1,20 @@
+# Backend
+*.pyc
+*.pyo
+__pycache__/
+env/
+venv/
+*.env
+*.sqlite3
+.DS_Store
+
+# Frontend
+node_modules/
+dist/
+build/
+*.log
+.DS_Store
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
