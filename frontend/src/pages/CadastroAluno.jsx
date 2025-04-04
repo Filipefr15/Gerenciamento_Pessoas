@@ -184,7 +184,7 @@ return (
                     <div className="col-md-6">
                         <label htmlFor="valor_mensalidade" className="form-label">Valor Mensalidade</label>
                         <input
-                            type="date"
+                            type="integer"
                             className="form-control"
                             id="valor_mensalidade"
                             name="valor_mensalidade"
