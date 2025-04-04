@@ -18,10 +18,6 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-fake_users_db = {
-    "admin": {"username": "admin", "password": "1234", "token": "fake_token_123"}
-}
-
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -34,16 +30,25 @@ class Aluno(Base):
     id = Column(Integer, primary_key=True, index=True)
     nome = Column(String, index=True)
     contato = Column(String)
+    telefone = Column(String)
+    forma_pagamento = Column(String)
+    fim_plano = Column(DateTime, nullable=True)
     data_matricula = Column(DateTime, default=datetime.utcnow)
     pagamentos = relationship("Pagamento", back_populates="aluno")
+    valor_mensalidade = Column(Integer, nullable=True)
 
 class AlunoCreate(BaseModel):
     nome: str
     contato: str
+    telefone: str
+    forma_pagamento: str
+    data_matricula: Optional[datetime] = datetime.utcnow
+    fim_plano: Optional[datetime] = None
+    valor_mensalidade: int
 
 class LoginData(BaseModel):
-    email: str
-    senha: str
+    username: str
+    password: str
 
 class Pagamento(Base):
     __tablename__ = "pagamentos"
@@ -58,6 +63,10 @@ class Usuario(Base):
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String, unique=True, index=True)
     hashed_password = Column(String)
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
 
 # Criar tabelas
 Base.metadata.create_all(bind=engine)
@@ -75,6 +84,24 @@ def verify_password(plain_password, hashed_password):
 
 def get_password_hash(password):
     return pwd_context.hash(password)
+
+async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    credentials_exception = HTTPException(
+        status_code=401,
+        detail="Credenciais inválidas",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    user = get_user(db, username=username)
+    if user is None:
+        raise credentials_exception
+    return user
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
@@ -110,8 +137,24 @@ def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db:
     access_token = create_access_token({"sub": user.username}, timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
     return {"access_token": access_token, "token_type": "bearer"}
 
+@app.post("/login/", response_model=Token)
+async def login(form_data: LoginData, db: Session = Depends(get_db)):
+    user = authenticate_user(db, form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Usuário ou senha incorretos")
+    access_token = create_access_token(
+        data={"sub": user.username}, 
+        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
 @app.post("/usuarios/")
 def criar_usuario(username: str, password: str, db: Session = Depends(get_db)):
+    # Verificar se o usuário já existe
+    existing_user = get_user(db, username)
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Nome de usuário já registrado")
+    
     hashed_password = get_password_hash(password)
     user = Usuario(username=username, hashed_password=hashed_password)
     db.add(user)
@@ -120,11 +163,11 @@ def criar_usuario(username: str, password: str, db: Session = Depends(get_db)):
     return {"username": user.username}
 
 @app.get("/alunos/")
-def listar_alunos(db: Session = Depends(get_db)):
+def listar_alunos(db: Session = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
     return db.query(Aluno).all()
 
 @app.post("/pagamentos/")
-def registrar_pagamento(aluno_id: int, periodo: str, db: Session = Depends(get_db)):
+def registrar_pagamento(aluno_id: int, periodo: str, db: Session = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
     aluno = db.query(Aluno).filter(Aluno.id == aluno_id).first()
     if not aluno:
         raise HTTPException(status_code=404, detail="Aluno não encontrado")
@@ -135,12 +178,12 @@ def registrar_pagamento(aluno_id: int, periodo: str, db: Session = Depends(get_d
     return pagamento
 
 @app.get("/alunos/inadimplentes/")
-def listar_inadimplentes(db: Session = Depends(get_db)):
+def listar_inadimplentes(db: Session = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
     inadimplentes = db.query(Aluno).filter(~Aluno.pagamentos.any()).all()
     return inadimplentes
 
 @app.get("/alunos/{aluno_id}/status")
-def status_aluno(aluno_id: int, db: Session = Depends(get_db)):
+def status_aluno(aluno_id: int, db: Session = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
     aluno = db.query(Aluno).filter(Aluno.id == aluno_id).first()
     if not aluno:
         raise HTTPException(status_code=404, detail="Aluno não encontrado")
@@ -157,17 +200,29 @@ def status_aluno(aluno_id: int, db: Session = Depends(get_db)):
     }
 
 @app.post("/alunos/")
-def criar_aluno(aluno: AlunoCreate, db: Session = Depends(get_db)):
-    novo_aluno = Aluno(nome=aluno.nome, contato=aluno.contato)
+def criar_aluno(aluno: AlunoCreate, db: Session = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
+    novo_aluno = Aluno(
+        nome=aluno.nome, 
+        contato=aluno.contato, 
+        telefone=aluno.telefone,
+        forma_pagamento=aluno.forma_pagamento,
+        data_matricula=aluno.data_matricula,
+        fim_plano=aluno.fim_plano,
+        valor_mensalidade=aluno.valor_mensalidade,
+    )
     db.add(novo_aluno)
     db.commit()
     db.refresh(novo_aluno)
     return novo_aluno
 
-@app.post("/login/")
-async def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    user = fake_users_db.get(form_data.username)
-    if not user or user["password"] != form_data.password:
-        raise HTTPException(status_code=400, detail="Usuário ou senha incorretos")
-    return {"token": user["token"]}
-
+# Rota para inicializar um usuário admin caso não exista
+@app.on_event("startup")
+async def startup_db_client():
+    db = SessionLocal()
+    admin = get_user(db, "admin")
+    if not admin:
+        admin_pwd = get_password_hash("1234")
+        admin = Usuario(username="admin", hashed_password=admin_pwd)
+        db.add(admin)
+        db.commit()
+    db.close()
